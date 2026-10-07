@@ -65,3 +65,6 @@ output/*
 
 # Logs
 *.log
+
+# Local test data
+SaaS-Sales.csv
