@@ -282,3 +282,25 @@ class TestExtractDateFromReport:
         """Test extracting date when not present."""
         date = extract_date_from_report('Just some text.')
         assert date is None
+
+
+class TestNewestFirstDiscovery:
+    """'Latest' must mean newest timestamp, not last alphabetically."""
+
+    def test_latest_report_is_newest_not_alphabetical(self, tmp_path):
+        from src.summarization.loader import find_latest_report
+
+        (tmp_path / "zeta_report_20240101_120000.md").write_text("# old")
+        (tmp_path / "alpha_report_20260101_120000.md").write_text("# new")
+
+        assert find_latest_report(str(tmp_path)).endswith("alpha_report_20260101_120000.md")
+
+    def test_cleaning_log_is_not_a_report(self, tmp_path):
+        from src.summarization.loader import find_report_files
+
+        (tmp_path / "sales_cleaning_log_20260101_120000.md").write_text("# audit")
+        (tmp_path / "sales_cleaned_report_20250101_120000.md").write_text("# report")
+
+        assert [Path(p).name for p in find_report_files(str(tmp_path))] == [
+            "sales_cleaned_report_20250101_120000.md"
+        ]

@@ -5,6 +5,8 @@ and visualization manifests from the @data-visualizer agent output.
 """
 
 import json
+import re
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -211,6 +213,8 @@ def _reconstruct_trend(data: Dict[str, Any]) -> TrendAnalysis:
         growth_rate_pct=data.get('growth_rate_pct'),
         seasonality_detected=data.get('seasonality_detected', False),
         seasonal_period=data.get('seasonal_period'),
+        period=data.get('period'),
+        aggregation=data.get('aggregation'),
     )
 
 
@@ -291,6 +295,33 @@ def _reconstruct_chart_manifest(data: Dict[str, Any], base_dir: str) -> ChartMan
 # DISCOVERY FUNCTIONS
 # =============================================================================
 
+# Every stage stamps its outputs with _YYYYmmdd_HHMMSS
+_TIMESTAMP_PATTERN = re.compile(r'(\d{8}_\d{6})')
+
+
+def sort_newest_first(paths: List[Path]) -> List[str]:
+    """
+    Sort output paths by the timestamp in their filename, newest first.
+
+    Sorting by name instead would rank "zeta_report_2024..." above
+    "alpha_report_2026...". Files without a timestamp fall back to
+    modification time.
+
+    Args:
+        paths: Paths to sort
+
+    Returns:
+        Path strings, newest first
+    """
+    def sort_key(p: Path) -> str:
+        stamps = _TIMESTAMP_PATTERN.findall(p.name)
+        if stamps:
+            return stamps[-1]
+        return datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y%m%d_%H%M%S")
+
+    return [str(p) for p in sorted(paths, key=sort_key, reverse=True)]
+
+
 def find_analysis_files(directory: str) -> List[str]:
     """
     Find all analysis JSON files in a directory.
@@ -306,8 +337,7 @@ def find_analysis_files(directory: str) -> List[str]:
         return []
 
     # Look for analysis JSON files
-    matches = list(path.glob("*_analysis_*.json"))
-    return sorted([str(m) for m in matches], reverse=True)  # Most recent first
+    return sort_newest_first(list(path.glob("*_analysis_*.json")))
 
 
 def find_visualization_manifest(directory: str) -> Optional[str]:
@@ -329,19 +359,18 @@ def find_visualization_manifest(directory: str) -> Optional[str]:
     if direct.exists():
         return str(direct)
 
-    # Search subdirectories
-    for subdir in path.iterdir():
+    # Search visualization directories, newest first
+    for viz_dir in sort_newest_first(list(path.glob("*_visualizations_*"))):
+        manifest = Path(viz_dir) / 'chart_manifest.json'
+        if manifest.exists():
+            return str(manifest)
+
+    # Fall back to any subdirectory with a manifest
+    for subdir in sorted(path.iterdir()):
         if subdir.is_dir():
             manifest = subdir / 'chart_manifest.json'
             if manifest.exists():
                 return str(manifest)
-
-    # Search for any visualization directories
-    viz_dirs = list(path.glob("*_visualizations_*"))
-    for viz_dir in viz_dirs:
-        manifest = viz_dir / 'chart_manifest.json'
-        if manifest.exists():
-            return str(manifest)
 
     return None
 

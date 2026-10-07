@@ -13,6 +13,7 @@ from src.analysis import AnalysisResult
 from src.reporting.loader import (
     load_analysis_result as load_analysis_json,
     load_visualization_manifest,
+    sort_newest_first,
 )
 
 
@@ -131,15 +132,13 @@ def find_report_files(directory: str) -> List[str]:
         directory: Directory to search
 
     Returns:
-        List of file paths matching *_report_*.md pattern, sorted by recency
+        List of file paths matching *_report_*.md pattern, newest first
     """
     path = Path(directory)
     if not path.exists():
         return []
 
-    # Look for report markdown files
-    matches = list(path.glob("*_report_*.md"))
-    return sorted([str(m) for m in matches], reverse=True)  # Most recent first
+    return sort_newest_first(list(path.glob("*_report_*.md")))
 
 
 def find_latest_report(directory: str) -> Optional[str]:
@@ -170,8 +169,7 @@ def find_analysis_files(directory: str) -> List[str]:
     if not path.exists():
         return []
 
-    matches = list(path.glob("*_analysis_*.json"))
-    return sorted([str(m) for m in matches], reverse=True)
+    return sort_newest_first(list(path.glob("*_analysis_*.json")))
 
 
 def find_latest_analysis(directory: str) -> Optional[str]:
@@ -204,10 +202,10 @@ def find_visualization_directory(directory: str) -> Optional[str]:
 
     # Look for visualization directories
     viz_dirs = list(path.glob("*_visualizations_*"))
-    for viz_dir in sorted(viz_dirs, reverse=True):
-        manifest = viz_dir / 'chart_manifest.json'
+    for viz_dir in sort_newest_first(viz_dirs):
+        manifest = Path(viz_dir) / 'chart_manifest.json'
         if manifest.exists():
-            return str(viz_dir)
+            return viz_dir
 
     return None
 

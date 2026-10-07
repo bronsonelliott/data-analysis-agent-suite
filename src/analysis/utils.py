@@ -4,6 +4,7 @@ This module provides column type classification, confidence scoring,
 and helper functions used across all analysis modules.
 """
 
+import re
 from typing import List, Optional, Tuple
 from enum import Enum
 import pandas as pd
@@ -97,20 +98,49 @@ def classify_column_type(series: pd.Series) -> ColumnType:
     return ColumnType.UNKNOWN
 
 
-def identify_numeric_columns(df: pd.DataFrame) -> List[str]:
+# Names like "id", "Row ID", "customer_id", "Date Key", "row_index",
+# and pandas' leftover index column "Unnamed: 0"
+_ID_NAME_PATTERN = re.compile(r'(?:^|[\s_])(id|key|index)$|^unnamed:', re.IGNORECASE)
+
+
+def is_identifier_column(series: pd.Series) -> bool:
+    """
+    Detect numeric columns that are identifiers rather than measurements.
+
+    IDs and keys are stored as numbers but have no numeric meaning, so
+    trends, correlations and outlier checks on them produce nonsense
+    findings ("strong upward trend in row_id"). Detection is by name only:
+    a column whose values happen to be 1, 2, 3... can still be a real metric.
+
+    Args:
+        series: The pandas Series to check (its name is used)
+
+    Returns:
+        True if the column name ends in "id", "key" or "index" as its own
+        word, or is a pandas "Unnamed: N" index column
+    """
+    name = str(series.name) if series.name is not None else ''
+    return bool(_ID_NAME_PATTERN.search(name.strip()))
+
+
+def identify_numeric_columns(df: pd.DataFrame, exclude_ids: bool = True) -> List[str]:
     """
     Identify all columns suitable for numeric analysis.
 
     Args:
         df: DataFrame to analyze
+        exclude_ids: Skip identifier columns (IDs, keys, row counters)
 
     Returns:
         List of column names classified as numeric
     """
     numeric_cols = []
     for col in df.columns:
-        if classify_column_type(df[col]) == ColumnType.NUMERIC:
-            numeric_cols.append(col)
+        if classify_column_type(df[col]) != ColumnType.NUMERIC:
+            continue
+        if exclude_ids and is_identifier_column(df[col]):
+            continue
+        numeric_cols.append(col)
     return numeric_cols
 
 

@@ -183,7 +183,7 @@ def generate_cleaning_report(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     source_name = Path(source_file).stem
     output_csv = f"{source_name}_cleaned_{timestamp}.csv"
-    output_report = f"{source_name}_report_{timestamp}.md"
+    output_report = f"{source_name}_cleaning_log_{timestamp}.md"
 
     # Read template
     template_path = Path(__file__).parent.parent.parent / "templates" / "cleaning_report.md"
@@ -282,7 +282,7 @@ def save_cleaning_results(
     source_name = Path(source_file).stem
 
     csv_filename = f"{source_name}_cleaned_{timestamp}.csv"
-    report_filename = f"{source_name}_report_{timestamp}.md"
+    report_filename = f"{source_name}_cleaning_log_{timestamp}.md"
 
     csv_path = output_path / csv_filename
     report_path = output_path / report_filename

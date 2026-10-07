@@ -32,7 +32,9 @@ class TrendAnalysis:
     r_squared: float  # Fit quality (0-1)
     growth_rate_pct: Optional[float] = None  # Percentage change over period
     seasonality_detected: bool = False
-    seasonal_period: Optional[str] = None  # 'weekly', 'monthly', 'quarterly'
+    seasonal_period: Optional[str] = None  # 'weekly', 'monthly', 'quarterly', 'yearly'
+    period: Optional[str] = None  # Aggregation grain: 'daily', 'weekly', 'monthly'
+    aggregation: Optional[str] = None  # How rows were rolled up: 'sum' or 'mean'
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -45,6 +47,8 @@ class TrendAnalysis:
             'growth_rate_pct': round(self.growth_rate_pct, 2) if self.growth_rate_pct is not None else None,
             'seasonality_detected': self.seasonality_detected,
             'seasonal_period': self.seasonal_period,
+            'period': self.period,
+            'aggregation': self.aggregation,
         }
 
     def describe(self) -> str:
@@ -111,6 +115,96 @@ def _ensure_datetime(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors='coerce')
 
 
+# Seasonal lags to test, in periods, for each aggregation frequency
+_SEASONAL_LAGS = {
+    'D': [('weekly', 7), ('monthly', 30)],
+    'W': [('monthly', 4), ('quarterly', 13), ('yearly', 52)],
+    'M': [('quarterly', 3), ('yearly', 12)],
+}
+
+_PERIOD_NAMES = {'D': 'daily', 'W': 'weekly', 'M': 'monthly'}
+
+
+def _choose_period(days_spanned: int) -> str:
+    """Pick an aggregation period that gives enough points to fit a trend."""
+    if days_spanned >= 730:
+        return 'M'
+    if days_spanned >= 90:
+        return 'W'
+    return 'D'
+
+
+def _is_rate_column(values: pd.Series) -> bool:
+    """Values all between 0 and 1 are rates/percentages: average them, don't sum."""
+    return bool(values.between(0, 1).all())
+
+
+def aggregate_by_period(
+    df: pd.DataFrame,
+    value_col: str,
+    date_col: str
+) -> tuple:
+    """
+    Roll a column up to one value per time period.
+
+    Trends must be measured on period totals, not individual rows. On
+    transaction data, a regression over raw rows answers "is the typical
+    order getting bigger?", not "is the business growing?".
+
+    - Period is monthly for 2+ years of data, weekly for 90+ days, else daily.
+    - Values are summed per period, except rate columns (all values 0-1),
+      which are averaged.
+    - First/last periods missing more than half their days are dropped,
+      so a half month doesn't look like a decline.
+    - Periods with no rows count as 0 for sums.
+
+    Args:
+        df: DataFrame containing the data
+        value_col: Numeric column to aggregate
+        date_col: Date column to group by
+
+    Returns:
+        Tuple of (Series indexed by Period, period code 'D'/'W'/'M',
+        aggregation 'sum'/'mean'). The Series is empty if there is no
+        usable data.
+    """
+    temp_df = df[[date_col, value_col]].copy()
+    temp_df[date_col] = _ensure_datetime(temp_df[date_col])
+
+    if not pd.api.types.is_numeric_dtype(temp_df[value_col]):
+        temp_df[value_col] = safe_numeric_conversion(temp_df[value_col])
+
+    temp_df = temp_df.dropna()
+    if temp_df.empty:
+        return pd.Series(dtype=float), 'D', 'sum'
+
+    dates = temp_df[date_col]
+    first_date, last_date = dates.min(), dates.max()
+    freq = _choose_period((last_date - first_date).days)
+    aggregation = 'mean' if _is_rate_column(temp_df[value_col]) else 'sum'
+
+    periods = dates.dt.to_period(freq)
+    grouped = temp_df.groupby(periods)[value_col].agg(aggregation)
+
+    # Fill in periods with no rows
+    full_range = pd.period_range(grouped.index.min(), grouped.index.max(), freq=freq)
+    grouped = grouped.reindex(full_range)
+    if aggregation == 'sum':
+        grouped = grouped.fillna(0)
+
+    # Drop an end period if the data misses more than half of it
+    # (a month that starts on the 4th is fine; one that starts on the 20th isn't)
+    if len(grouped) > 2:
+        first_period, last_period = grouped.index[0], grouped.index[-1]
+        half = (first_period.end_time - first_period.start_time) / 2
+        if first_date - first_period.start_time > half:
+            grouped = grouped.iloc[1:]
+        if last_period.end_time - last_date > half:
+            grouped = grouped.iloc[:-1]
+
+    return grouped.dropna().astype(float), freq, aggregation
+
+
 def analyze_trend(
     df: pd.DataFrame,
     value_col: str,
@@ -119,7 +213,8 @@ def analyze_trend(
     """
     Analyze the trend of a numeric column over time.
 
-    Fits a linear regression to determine trend direction and strength.
+    Rolls the data up to period totals (see aggregate_by_period), then fits
+    a linear regression to determine trend direction and strength.
 
     Args:
         df: DataFrame containing the data
@@ -129,39 +224,32 @@ def analyze_trend(
     Returns:
         TrendAnalysis with trend metrics
     """
-    # Prepare data
-    temp_df = df[[date_col, value_col]].copy()
-    temp_df[date_col] = _ensure_datetime(temp_df[date_col])
+    series, freq, aggregation = aggregate_by_period(df, value_col, date_col)
 
-    if not pd.api.types.is_numeric_dtype(temp_df[value_col]):
-        temp_df[value_col] = safe_numeric_conversion(temp_df[value_col])
-
-    # Drop missing values and sort by date
-    temp_df = temp_df.dropna().sort_values(date_col)
-
-    if len(temp_df) < 5:
+    if len(series) < 5:
         return TrendAnalysis(
             column=value_col,
             date_column=date_col,
             trend_direction='unknown',
             slope=0.0,
             r_squared=0.0,
+            period=_PERIOD_NAMES[freq],
+            aggregation=aggregation,
         )
 
-    # Convert dates to numeric (days since first date)
-    first_date = temp_df[date_col].min()
-    temp_df['_days'] = (temp_df[date_col] - first_date).dt.days
-
-    # Perform linear regression
-    x = temp_df['_days'].values
-    y = temp_df[value_col].values
+    # x = days since the first period, so slope stays "change per day"
+    starts = series.index.to_timestamp()
+    x = (starts - starts[0]).days.to_numpy()
+    y = series.to_numpy()
 
     slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
     r_squared = r_value ** 2
 
-    # Calculate growth rate
-    first_value = y[0]
-    last_value = y[-1]
+    # Growth: average of the first quarter of periods vs the last quarter.
+    # With 4 years of monthly data this is first-12-months vs last-12-months.
+    k = max(1, len(y) // 4)
+    first_value = y[:k].mean()
+    last_value = y[-k:].mean()
     if first_value != 0:
         growth_rate_pct = ((last_value - first_value) / abs(first_value)) * 100
     else:
@@ -171,7 +259,10 @@ def analyze_trend(
     # Consider both slope significance and coefficient of variation
     cv = np.std(y) / np.mean(y) if np.mean(y) != 0 else float('inf')
 
-    if r_squared < 0.1 or p_value > 0.1:
+    # A flat series leaves only rounding noise for the regression to "fit"
+    flat = np.std(y) < 1e-9 * max(1.0, abs(np.mean(y)))
+
+    if flat or r_squared < 0.1 or p_value > 0.1:
         # Poor fit - check for volatility
         if cv > 0.5:
             trend_direction = 'volatile'
@@ -182,8 +273,7 @@ def analyze_trend(
     else:
         trend_direction = 'decreasing'
 
-    # Check for seasonality
-    seasonality_detected, seasonal_period = detect_seasonality(df, value_col, date_col)
+    seasonality_detected, seasonal_period = _detect_seasonality_in_series(series, freq)
 
     return TrendAnalysis(
         column=value_col,
@@ -194,7 +284,57 @@ def analyze_trend(
         growth_rate_pct=float(growth_rate_pct) if growth_rate_pct is not None else None,
         seasonality_detected=seasonality_detected,
         seasonal_period=seasonal_period,
+        period=_PERIOD_NAMES[freq],
+        aggregation=aggregation,
     )
+
+
+def _detect_seasonality_in_series(series: pd.Series, freq: str) -> tuple:
+    """
+    Check an aggregated series for repeating cycles.
+
+    Removes the linear trend first (otherwise any trending series looks
+    "seasonal"), then measures autocorrelation at each candidate lag.
+    A lag counts only if the series covers at least two full cycles and
+    the autocorrelation clears both 0.3 and the ~95% noise band (2/sqrt(n)).
+    The shortest qualifying lag wins, since multiples of a cycle also correlate.
+
+    Args:
+        series: One value per period, from aggregate_by_period
+        freq: Period code 'D', 'W' or 'M'
+
+    Returns:
+        Tuple of (is_seasonal: bool, period: Optional[str])
+    """
+    values = series.to_numpy(dtype=float)
+    n = len(values)
+    if n < 8:
+        return (False, None)
+
+    # Remove the linear trend
+    x = np.arange(n)
+    slope, intercept = np.polyfit(x, values, 1)
+    residuals = values - (slope * x + intercept)
+
+    # Perfectly linear data leaves only rounding noise, which isn't a cycle
+    scale = max(1.0, np.abs(values).mean())
+    if np.std(residuals) < 1e-9 * scale:
+        return (False, None)
+
+    threshold = max(0.3, 2 / np.sqrt(n))
+
+    # Lags are listed shortest first. Report the shortest one that clears the
+    # threshold: a 30-day cycle also correlates at 90 days, but it's monthly.
+    for period_name, lag in _SEASONAL_LAGS[freq]:
+        if n < 2 * lag:
+            continue
+
+        acf_at_lag = np.corrcoef(residuals[:-lag], residuals[lag:])[0, 1]
+
+        if acf_at_lag > threshold:
+            return (True, period_name)
+
+    return (False, None)
 
 
 def detect_seasonality(
@@ -205,8 +345,9 @@ def detect_seasonality(
     """
     Detect if there is seasonality in the data.
 
-    Checks for weekly, monthly, and quarterly patterns using
-    autocorrelation at relevant lags.
+    Aggregates to period totals, removes the trend, and checks
+    autocorrelation at weekly/monthly/quarterly/yearly lags as the
+    data's time span allows.
 
     Args:
         df: DataFrame containing the data
@@ -216,64 +357,8 @@ def detect_seasonality(
     Returns:
         Tuple of (is_seasonal: bool, period: Optional[str])
     """
-    temp_df = df[[date_col, value_col]].copy()
-    temp_df[date_col] = _ensure_datetime(temp_df[date_col])
-
-    if not pd.api.types.is_numeric_dtype(temp_df[value_col]):
-        temp_df[value_col] = safe_numeric_conversion(temp_df[value_col])
-
-    temp_df = temp_df.dropna().sort_values(date_col)
-
-    if len(temp_df) < 30:
-        return (False, None)
-
-    values = temp_df[value_col].values
-
-    # Determine the time span
-    date_range = temp_df[date_col].max() - temp_df[date_col].min()
-    days = date_range.days
-
-    # Check different seasonal periods based on data span
-    periods_to_check = []
-
-    if days >= 60:  # At least 2 months
-        # Weekly patterns (7 days)
-        periods_to_check.append(('weekly', 7))
-
-    if days >= 180:  # At least 6 months
-        # Monthly patterns (~30 days)
-        periods_to_check.append(('monthly', 30))
-
-    if days >= 365:  # At least 1 year
-        # Quarterly patterns (~90 days)
-        periods_to_check.append(('quarterly', 90))
-
-    # Calculate autocorrelation at each lag
-    best_period = None
-    best_acf = 0.0
-
-    for period_name, lag in periods_to_check:
-        if lag >= len(values) // 2:
-            continue
-
-        # Calculate autocorrelation at this lag
-        n = len(values)
-        mean = np.mean(values)
-        var = np.var(values)
-
-        if var == 0:
-            continue
-
-        # Autocorrelation formula
-        acf = np.correlate(values - mean, values - mean, mode='full')[n-1:n+lag]
-        if len(acf) > lag:
-            acf_at_lag = acf[lag] / (var * n)
-
-            if acf_at_lag > 0.3 and acf_at_lag > best_acf:
-                best_period = period_name
-                best_acf = acf_at_lag
-
-    return (best_period is not None, best_period)
+    series, freq, _ = aggregate_by_period(df, value_col, date_col)
+    return _detect_seasonality_in_series(series, freq)
 
 
 def find_trend_insights(
@@ -320,7 +405,8 @@ def find_trend_insights(
 
             title = f"{strength.title()} {direction} trend in {col}"
             description = (
-                f"'{col}' shows a {strength} {direction} trend over time{growth_str}. "
+                f"{trend.period.title()} {trend.aggregation} of '{col}' shows a "
+                f"{strength} {direction} trend over time{growth_str}. "
                 f"The trend explains {trend.r_squared*100:.1f}% of the variation."
             )
 
@@ -348,7 +434,8 @@ def find_trend_insights(
                 category='trend',
                 title=f"High volatility in {col}",
                 description=(
-                    f"'{col}' shows high variability over time without a clear trend. "
+                    f"{trend.period.title()} {trend.aggregation} of '{col}' varies a lot "
+                    f"without a clear trend. "
                     f"This may indicate instability or seasonal fluctuations."
                 ),
                 affected_columns=[col, date_col],

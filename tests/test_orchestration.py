@@ -1104,3 +1104,18 @@ class TestOrchestrationIntegration:
             state = result["state"]
             assert state is not None
             assert state.cleaned_csv_path is not None
+
+
+class TestResumeFromFirstMissingStage:
+    """A later stage's output must not cause earlier stages to be skipped."""
+
+    def test_missing_analysis_is_rerun(self, tmp_path):
+        from src.orchestration.discovery import discover_resumable_state
+
+        ts = "20260101_120000"
+        (tmp_path / f"sales_cleaned_{ts}.csv").write_text("a\n1\n")
+        (tmp_path / f"sales_report_{ts}.md").write_text("# report")
+
+        state = discover_resumable_state("sales.csv", str(tmp_path))
+
+        assert state["resume_from"].value == "analysis"

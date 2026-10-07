@@ -328,18 +328,13 @@ def discover_resumable_state(
     if not completed:
         return result
 
-    # Determine resume point (first incomplete stage after last completed)
-    stage_order = PipelineStage.get_order()
-    last_completed_idx = -1
-
-    for stage in stage_order:
-        if stage.value in completed:
-            last_completed_idx = stage.get_index()
-
-    # Can resume from the next stage after the last completed
-    if last_completed_idx < len(stage_order) - 1:
-        result["resume_from"] = stage_order[last_completed_idx + 1]
-        result["can_resume"] = True
+    # Resume from the first stage with no output. A later stage's file
+    # existing doesn't mean the earlier ones ran in this pipeline run.
+    for stage in PipelineStage.get_order():
+        if stage.value not in completed:
+            result["resume_from"] = stage
+            result["can_resume"] = True
+            break
 
     # Build pipeline state
     state = PipelineState(

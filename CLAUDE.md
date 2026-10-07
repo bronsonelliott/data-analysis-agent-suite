@@ -217,7 +217,7 @@ All generated files go to `./output/` with timestamped filenames:
 
 | Agent | Output Files |
 |-------|--------------|
-| Data Cleaner | `{source}_cleaned_{timestamp}.csv`, `{source}_report_{timestamp}.md` |
+| Data Cleaner | `{source}_cleaned_{timestamp}.csv`, `{source}_cleaning_log_{timestamp}.md` |
 | Data Analyzer | `{source}_analysis_{timestamp}.json`, `{source}_analysis_{timestamp}.md` |
 | Data Visualizer | `{source}_visualizations_{timestamp}/` (directory with `index.html`, charts, `chart_manifest.json`) |
 | Report Writer | `{source}_report_{timestamp}.md` |

@@ -366,7 +366,7 @@ Each invocation starts fresh:
 
 All output goes to `./output/`:
 - `{filename}_cleaned_{timestamp}.csv` - The cleaned data
-- `{filename}_report_{timestamp}.md` - The audit trail
+- `{filename}_cleaning_log_{timestamp}.md` - The audit trail
 
 ## Example Conversation
 

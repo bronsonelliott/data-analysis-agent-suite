@@ -267,17 +267,24 @@ class TestDetectSeasonality:
         """Test detection of seasonal pattern."""
         is_seasonal, period = detect_seasonality(seasonal_df, 'value', 'date')
 
-        # Should detect some seasonality (monthly pattern)
-        # Note: Autocorrelation-based detection might not always perfectly identify period
-        assert isinstance(is_seasonal, bool)
+        assert is_seasonal is True
+        assert period == 'monthly'
 
     def test_no_seasonality(self, trending_df):
         """Test when no seasonality exists."""
         is_seasonal, period = detect_seasonality(trending_df, 'value', 'date')
 
-        # Linear trend should not show strong seasonality
-        # (though this depends on the detection sensitivity)
-        assert isinstance(is_seasonal, bool)
+        assert is_seasonal is False
+
+    def test_pure_linear_trend_is_not_seasonal(self):
+        """A trending series must not be mistaken for a cycle."""
+        df = pd.DataFrame({
+            'date': pd.date_range('2022-01-01', periods=400),
+            'value': np.arange(400, dtype=float),
+        })
+        is_seasonal, period = detect_seasonality(df, 'value', 'date')
+
+        assert is_seasonal is False
 
     def test_insufficient_data(self):
         """Test with insufficient data for seasonality detection."""
@@ -361,3 +368,49 @@ class TestFindTrendInsights:
         # (might still have volatility insights)
         strong_trend_insights = [i for i in insights if 'trend' in i.title.lower() and i.importance == 'high']
         assert len(strong_trend_insights) == 0
+
+
+class TestTransactionLevelData:
+    """Trends on many-rows-per-day data must use period totals."""
+
+    @pytest.fixture
+    def transactions_df(self):
+        """3 years of orders; yearly revenue grows 100 -> 150 -> 200 per day."""
+        rng = np.random.default_rng(7)
+        rows = []
+        for year, daily_total in [(2021, 100.0), (2022, 150.0), (2023, 200.0)]:
+            for day in pd.date_range(f'{year}-01-01', f'{year}-12-31'):
+                # Split each day's total across a random number of orders
+                n_orders = rng.integers(1, 6)
+                weights = rng.dirichlet(np.ones(n_orders))
+                for amount in daily_total * weights:
+                    rows.append({'order_date': day, 'order_id': len(rows), 'sales': amount})
+        return pd.DataFrame(rows)
+
+    def test_uses_monthly_totals(self, transactions_df):
+        trend = analyze_trend(transactions_df, 'sales', 'order_date')
+
+        assert trend.period == 'monthly'
+        assert trend.aggregation == 'sum'
+        assert trend.trend_direction == 'increasing'
+
+    def test_growth_ties_out_to_period_totals(self, transactions_df):
+        """First 9 months average ~100/day, last 9 ~200/day -> ~+100%."""
+        trend = analyze_trend(transactions_df, 'sales', 'order_date')
+
+        assert trend.growth_rate_pct == pytest.approx(100, abs=5)
+
+    def test_rate_columns_are_averaged(self):
+        df = pd.DataFrame({
+            'date': pd.date_range('2023-01-01', periods=120).repeat(3),
+            'discount': [0.1, 0.2, 0.3] * 120,
+        })
+        trend = analyze_trend(df, 'discount', 'date')
+
+        assert trend.aggregation == 'mean'
+        assert trend.trend_direction == 'stable'
+
+    def test_id_columns_get_no_findings(self, transactions_df):
+        insights = find_trend_insights(transactions_df, 'order_date')
+
+        assert not any('order_id' in i.affected_columns for i in insights)

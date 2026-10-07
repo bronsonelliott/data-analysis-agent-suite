@@ -513,3 +513,22 @@ class TestReportGeneration:
         # Check file extensions
         assert paths['report'].endswith('.md')
         assert paths['json'].endswith('.json')
+
+
+class TestIdentifierColumns:
+    """Numeric IDs and keys are not metrics."""
+
+    def test_ids_excluded_from_numeric_analysis(self):
+        from src.analysis.utils import identify_numeric_columns
+
+        df = pd.DataFrame({
+            'Row ID': [1, 2, 3, 4],
+            'customer_id': [17, 4, 99, 23],
+            'Date Key': [20220101, 20220102, 20220103, 20220104],
+            'Unnamed: 0': [0, 1, 2, 3],
+            'paid': [10.0, 20.0, 30.0, 40.0],
+            'value': [1, 2, 3, 4],
+        })
+
+        assert identify_numeric_columns(df) == ['paid', 'value']
+        assert len(identify_numeric_columns(df, exclude_ids=False)) == 6
