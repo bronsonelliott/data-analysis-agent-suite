@@ -1,5 +1,7 @@
 # Data Analysis Agent Suite
 
+> **Status: retired (2026-10-06).** No longer developed as a product; kept as a learning artifact. Anthropic's `data` plugin (anthropics/knowledge-work-plugins) covers the same jobs. The Python library works and is tested (647 tests), but the agents in `agents/` do not load in Claude Code. Decision record: `~/claude/lab/MEMORY.md`.
+
 A suite of Claude Code subagents for automated data analysis workflows. Transform raw CSV/Excel data into clean datasets, statistical insights, interactive visualizations, and executive-ready reports.
 
 ---
