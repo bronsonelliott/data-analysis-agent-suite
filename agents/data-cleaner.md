@@ -299,7 +299,7 @@ Present the final summary:
 
 **Output Files:**
 - 📄 Cleaned data: `./output/data_cleaned_20240115_143022.csv`
-- 📋 Audit report: `./output/data_report_20240115_143022.md`
+- 📋 Audit report: `./output/data_cleaning_log_20240115_143022.md`
 
 The report contains a complete audit trail with row numbers for every change made.
 ```

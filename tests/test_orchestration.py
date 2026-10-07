@@ -1119,3 +1119,21 @@ class TestResumeFromFirstMissingStage:
         state = discover_resumable_state("sales.csv", str(tmp_path))
 
         assert state["resume_from"].value == "analysis"
+
+
+class TestLatestRunByFilenameTimestamp:
+    """Touching or copying an old output must not make it the 'latest' run."""
+
+    def test_touched_old_run_is_not_latest(self, tmp_path):
+        from src.orchestration.discovery import find_latest_outputs_for_source
+
+        old = tmp_path / "sales_cleaned_20250101_120000.csv"
+        new = tmp_path / "sales_cleaned_20260101_120000.csv"
+        new.write_text("a\n1\n")
+        old.write_text("a\n1\n")  # written last, so it has the newest mtime
+        os.utime(new, (1_000_000_000, 1_000_000_000))
+
+        outputs, timestamp = find_latest_outputs_for_source("sales", str(tmp_path))
+
+        assert timestamp == "20260101_120000"
+        assert outputs["cleaned_csv"].endswith("sales_cleaned_20260101_120000.csv")

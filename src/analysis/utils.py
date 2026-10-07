@@ -98,9 +98,13 @@ def classify_column_type(series: pd.Series) -> ColumnType:
     return ColumnType.UNKNOWN
 
 
-# Names like "id", "Row ID", "customer_id", "Date Key", "row_index",
+# Names like "id", "Row ID", "customer_id", "Date Key",
 # and pandas' leftover index column "Unnamed: 0"
-_ID_NAME_PATTERN = re.compile(r'(?:^|[\s_])(id|key|index)$|^unnamed:', re.IGNORECASE)
+_ID_NAME_PATTERN = re.compile(r'(?:^|[\s_])(id|key)$|^unnamed:', re.IGNORECASE)
+
+# "row_index" is an identifier but "consumer_price_index" is a metric,
+# so names ending in "index" also need ID-like values (see below)
+_INDEX_NAME_PATTERN = re.compile(r'(?:^|[\s_])index$', re.IGNORECASE)
 
 
 def is_identifier_column(series: pd.Series) -> bool:
@@ -109,18 +113,36 @@ def is_identifier_column(series: pd.Series) -> bool:
 
     IDs and keys are stored as numbers but have no numeric meaning, so
     trends, correlations and outlier checks on them produce nonsense
-    findings ("strong upward trend in row_id"). Detection is by name only:
-    a column whose values happen to be 1, 2, 3... can still be a real metric.
+    findings ("strong upward trend in row_id").
+
+    - Name ends in "id" or "key" as its own word, or is a pandas
+      "Unnamed: N" index column -> identifier. Name alone decides, since a
+      key like "Date Key" repeats across rows.
+    - Name ends in "index" -> identifier only if the values are also
+      unique whole numbers. A price index has decimals or repeats.
+
+    A column whose values happen to be 1, 2, 3... but has no ID-like name
+    is still treated as a metric.
 
     Args:
         series: The pandas Series to check (its name is used)
 
     Returns:
-        True if the column name ends in "id", "key" or "index" as its own
-        word, or is a pandas "Unnamed: N" index column
+        True if the column looks like an identifier
     """
-    name = str(series.name) if series.name is not None else ''
-    return bool(_ID_NAME_PATTERN.search(name.strip()))
+    name = str(series.name).strip() if series.name is not None else ''
+
+    if _ID_NAME_PATTERN.search(name):
+        return True
+
+    if _INDEX_NAME_PATTERN.search(name):
+        values = series.dropna()
+        whole_numbers = pd.api.types.is_integer_dtype(values) or (
+            pd.api.types.is_float_dtype(values) and (values % 1 == 0).all()
+        )
+        return bool(len(values) > 0 and whole_numbers and values.is_unique)
+
+    return False
 
 
 def identify_numeric_columns(df: pd.DataFrame, exclude_ids: bool = True) -> List[str]:

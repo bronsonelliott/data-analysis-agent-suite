@@ -109,10 +109,17 @@ def detect_date_column(df: pd.DataFrame) -> Optional[str]:
 
 
 def _ensure_datetime(series: pd.Series) -> pd.Series:
-    """Convert a series to datetime if not already."""
-    if pd.api.types.is_datetime64_any_dtype(series):
-        return series
-    return pd.to_datetime(series, errors='coerce')
+    """
+    Convert a series to timezone-naive datetime.
+
+    Timezones are dropped (keeping local wall-clock time) because period
+    grouping is timezone-naive; comparing the two raises a TypeError.
+    """
+    if not pd.api.types.is_datetime64_any_dtype(series):
+        series = pd.to_datetime(series, errors='coerce')
+    if getattr(series.dt, 'tz', None) is not None:
+        series = series.dt.tz_localize(None)
+    return series
 
 
 # Seasonal lags to test, in periods, for each aggregation frequency
@@ -120,18 +127,48 @@ _SEASONAL_LAGS = {
     'D': [('weekly', 7), ('monthly', 30)],
     'W': [('monthly', 4), ('quarterly', 13), ('yearly', 52)],
     'M': [('quarterly', 3), ('yearly', 12)],
+    'Q': [('yearly', 4)],
+    'Y': [],
 }
 
-_PERIOD_NAMES = {'D': 'daily', 'W': 'weekly', 'M': 'monthly'}
+_PERIOD_NAMES = {'D': 'daily', 'W': 'weekly', 'M': 'monthly', 'Q': 'quarterly', 'Y': 'yearly'}
+
+# Periods from finest to coarsest, with the shortest length (in days) each can have
+_PERIOD_MIN_DAYS = [('D', 1), ('W', 7), ('M', 28), ('Q', 89), ('Y', 365)]
 
 
-def _choose_period(days_spanned: int) -> str:
-    """Pick an aggregation period that gives enough points to fit a trend."""
+def _choose_period(days_spanned: int, native_spacing_days: float) -> str:
+    """
+    Pick an aggregation period.
+
+    Two rules, and the coarser answer wins:
+    - Enough points to fit a trend: monthly for 2+ years, weekly for 90+ days,
+      otherwise daily.
+    - Never finer than the data itself: quarterly figures are grouped by
+      quarter, not spread across months with zeros in between.
+    """
     if days_spanned >= 730:
-        return 'M'
-    if days_spanned >= 90:
-        return 'W'
-    return 'D'
+        by_span = 'M'
+    elif days_spanned >= 90:
+        by_span = 'W'
+    else:
+        by_span = 'D'
+
+    by_spacing = 'D'
+    for code, min_days in _PERIOD_MIN_DAYS:
+        if native_spacing_days >= min_days * 0.9:
+            by_spacing = code
+
+    order = [code for code, _ in _PERIOD_MIN_DAYS]
+    return max(by_span, by_spacing, key=order.index)
+
+
+def _native_spacing_days(dates: pd.Series) -> float:
+    """Typical gap between distinct dates, in days (median, so a few gaps don't matter)."""
+    distinct = dates.drop_duplicates().sort_values()
+    if len(distinct) < 2:
+        return 0.0
+    return float(distinct.diff().dropna().dt.days.median())
 
 
 def _is_rate_column(values: pd.Series) -> bool:
@@ -151,12 +188,16 @@ def aggregate_by_period(
     transaction data, a regression over raw rows answers "is the typical
     order getting bigger?", not "is the business growing?".
 
-    - Period is monthly for 2+ years of data, weekly for 90+ days, else daily.
+    - Period comes from the date span and the data's own spacing
+      (see _choose_period), so it is never finer than how often data is recorded.
     - Values are summed per period, except rate columns (all values 0-1),
       which are averaged.
-    - First/last periods missing more than half their days are dropped,
-      so a half month doesn't look like a decline.
-    - Periods with no rows count as 0 for sums.
+    - When the data is finer than the period (e.g. daily orders grouped
+      by month):
+      - periods with no rows at all count as 0 for sums;
+      - first/last periods missing more than half their days are dropped,
+        so a half month doesn't look like a decline.
+    - Periods whose rows all have a missing value are left out, not zeroed.
 
     Args:
         df: DataFrame containing the data
@@ -164,7 +205,7 @@ def aggregate_by_period(
         date_col: Date column to group by
 
     Returns:
-        Tuple of (Series indexed by Period, period code 'D'/'W'/'M',
+        Tuple of (Series indexed by Period, period code 'D'/'W'/'M'/'Q'/'Y',
         aggregation 'sum'/'mean'). The Series is empty if there is no
         usable data.
     """
@@ -174,33 +215,48 @@ def aggregate_by_period(
     if not pd.api.types.is_numeric_dtype(temp_df[value_col]):
         temp_df[value_col] = safe_numeric_conversion(temp_df[value_col])
 
-    temp_df = temp_df.dropna()
-    if temp_df.empty:
+    # Keep rows with a missing value for now: they still show the period had activity
+    temp_df = temp_df.dropna(subset=[date_col])
+    if temp_df[value_col].isna().all():
         return pd.Series(dtype=float), 'D', 'sum'
 
     dates = temp_df[date_col]
     first_date, last_date = dates.min(), dates.max()
-    freq = _choose_period((last_date - first_date).days)
-    aggregation = 'mean' if _is_rate_column(temp_df[value_col]) else 'sum'
+    spacing = _native_spacing_days(dates)
+    freq = _choose_period((last_date - first_date).days, spacing)
+    aggregation = 'mean' if _is_rate_column(temp_df[value_col].dropna()) else 'sum'
 
     periods = dates.dt.to_period(freq)
-    grouped = temp_df.groupby(periods)[value_col].agg(aggregation)
-
-    # Fill in periods with no rows
-    full_range = pd.period_range(grouped.index.min(), grouped.index.max(), freq=freq)
-    grouped = grouped.reindex(full_range)
+    by_period = temp_df.groupby(periods)[value_col]
     if aggregation == 'sum':
-        grouped = grouped.fillna(0)
+        grouped = by_period.sum(min_count=1)  # all-missing period -> NaN, not 0
+    else:
+        grouped = by_period.mean()
 
-    # Drop an end period if the data misses more than half of it
-    # (a month that starts on the 4th is fine; one that starts on the 20th isn't)
-    if len(grouped) > 2:
-        first_period, last_period = grouped.index[0], grouped.index[-1]
-        half = (first_period.end_time - first_period.start_time) / 2
-        if first_date - first_period.start_time > half:
-            grouped = grouped.iloc[1:]
-        if last_period.end_time - last_date > half:
-            grouped = grouped.iloc[:-1]
+    full_range = pd.period_range(grouped.index.min(), grouped.index.max(), freq=freq)
+    periods_with_rows = grouped.index
+    grouped = grouped.reindex(full_range)
+
+    period_min_days = dict(_PERIOD_MIN_DAYS)[freq]
+    data_finer_than_period = spacing < period_min_days * 0.9
+
+    if data_finer_than_period:
+        # A period with no rows at all had no activity
+        if aggregation == 'sum':
+            no_rows = ~grouped.index.isin(periods_with_rows)
+            grouped[no_rows] = 0.0
+
+        # Drop an end period if the data misses more than half its days
+        # (a month that starts on the 4th is fine; one that starts on the 20th isn't)
+        if len(grouped) > 2:
+            first_period, last_period = grouped.index[0], grouped.index[-1]
+            days_in_period = (first_period.end_time.normalize() - first_period.start_time).days + 1
+            missing_at_start = (first_date.normalize() - first_period.start_time).days
+            missing_at_end = (last_period.end_time.normalize() - last_date.normalize()).days
+            if missing_at_start > days_in_period / 2:
+                grouped = grouped.iloc[1:]
+            if missing_at_end > days_in_period / 2:
+                grouped = grouped.iloc[:-1]
 
     return grouped.dropna().astype(float), freq, aggregation
 

@@ -8,9 +8,10 @@ This module provides functions to:
 
 import os
 import re
-from datetime import datetime
 from glob import glob
 from typing import Any, Dict, List, Optional, Tuple
+
+from src.output_files import sort_newest_first
 
 from .pipeline import PipelineStage, PipelineState
 
@@ -133,18 +134,6 @@ def _extract_timestamp(filename: str, source_name: str) -> Optional[str]:
     return None
 
 
-def _get_file_mtime(file_path: str) -> datetime:
-    """Get the modification time of a file.
-
-    Args:
-        file_path: Path to the file
-
-    Returns:
-        Modification datetime
-    """
-    return datetime.fromtimestamp(os.path.getmtime(file_path))
-
-
 def find_outputs_for_source(
     source_name: str,
     output_dir: str,
@@ -193,9 +182,7 @@ def find_outputs_for_source(
                 matches = [m for m in matches if timestamp in m]
 
             if matches:
-                # Sort by modification time, most recent first
-                matches.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-                results[key] = matches[0]
+                results[key] = sort_newest_first(matches)[0]
 
     # Search for secondary outputs (analysis markdown)
     for key, pattern in SECONDARY_PATTERNS.items():
@@ -205,8 +192,7 @@ def find_outputs_for_source(
             if timestamp:
                 matches = [m for m in matches if timestamp in m]
             if matches:
-                matches.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-                results[key] = matches[0]
+                results[key] = sort_newest_first(matches)[0]
 
     return results
 
@@ -240,20 +226,17 @@ def find_latest_outputs_for_source(
         # No previous runs found
         return find_outputs_for_source(source_name, output_dir), None
 
-    # Get timestamps from cleaned files
-    timestamps: List[Tuple[str, datetime]] = []
-    for f in cleaned_files:
-        ts = _extract_timestamp(os.path.basename(f), source_name)
-        if ts:
-            mtime = _get_file_mtime(f)
-            timestamps.append((ts, mtime))
+    # The newest cleaned file (by filename timestamp) identifies the latest run
+    timestamps = [
+        _extract_timestamp(os.path.basename(f), source_name)
+        for f in sort_newest_first(cleaned_files)
+    ]
+    timestamps = [ts for ts in timestamps if ts]
 
     if not timestamps:
         return find_outputs_for_source(source_name, output_dir), None
 
-    # Sort by modification time, get most recent
-    timestamps.sort(key=lambda x: x[1], reverse=True)
-    latest_ts = timestamps[0][0]
+    latest_ts = timestamps[0]
 
     # Find all outputs with this timestamp
     outputs = find_outputs_for_source(source_name, output_dir, timestamp=latest_ts)

@@ -532,3 +532,14 @@ class TestIdentifierColumns:
 
         assert identify_numeric_columns(df) == ['paid', 'value']
         assert len(identify_numeric_columns(df, exclude_ids=False)) == 6
+
+    def test_index_suffix_needs_id_like_values(self):
+        from src.analysis.utils import identify_numeric_columns
+
+        df = pd.DataFrame({
+            'row_index': [0, 1, 2, 3],
+            'consumer_price_index': [301.8, 303.4, 303.4, 305.1],
+            'satisfaction_index': [3, 4, 4, 5],
+        })
+
+        assert identify_numeric_columns(df) == ['consumer_price_index', 'satisfaction_index']

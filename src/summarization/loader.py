@@ -13,8 +13,8 @@ from src.analysis import AnalysisResult
 from src.reporting.loader import (
     load_analysis_result as load_analysis_json,
     load_visualization_manifest,
-    sort_newest_first,
 )
+from src.output_files import sort_newest_first
 
 
 # =============================================================================

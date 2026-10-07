@@ -414,3 +414,100 @@ class TestTransactionLevelData:
         insights = find_trend_insights(transactions_df, 'order_date')
 
         assert not any('order_id' in i.affected_columns for i in insights)
+
+
+class TestPeriodEdges:
+    """Partial first/last periods are dropped; complete ones are kept."""
+
+    @staticmethod
+    def _flat_daily(start, end):
+        dates = pd.date_range(start, end)
+        return pd.DataFrame({'date': dates, 'sales': np.full(len(dates), 10.0)})
+
+    def test_partial_last_month_dropped(self):
+        from src.analysis.trends import aggregate_by_period
+
+        # Ends on the 10th: December is missing 21 of 31 days
+        series, freq, _ = aggregate_by_period(
+            self._flat_daily('2020-01-01', '2022-12-10'), 'sales', 'date')
+
+        assert freq == 'M'
+        assert str(series.index[-1]) == '2022-11'
+        assert analyze_trend(self._flat_daily('2020-01-01', '2022-12-10'),
+                             'sales', 'date').trend_direction == 'stable'
+
+    def test_partial_first_month_dropped(self):
+        from src.analysis.trends import aggregate_by_period
+
+        # Starts on the 25th: January is missing 24 of 31 days
+        series, _, _ = aggregate_by_period(
+            self._flat_daily('2020-01-25', '2022-12-31'), 'sales', 'date')
+
+        assert str(series.index[0]) == '2020-02'
+
+    def test_nearly_complete_month_kept(self):
+        from src.analysis.trends import aggregate_by_period
+
+        # Starts on the 3rd: January is missing only 2 days
+        series, _, _ = aggregate_by_period(
+            self._flat_daily('2020-01-03', '2022-12-31'), 'sales', 'date')
+
+        assert str(series.index[0]) == '2020-01'
+
+    @pytest.mark.parametrize('dates', [
+        pd.date_range('2021-01-01', periods=36, freq='MS'),   # month-start dated
+        pd.date_range('2021-01-31', periods=36, freq='ME'),   # month-end dated
+    ])
+    def test_period_dated_data_keeps_every_period(self, dates):
+        from src.analysis.trends import aggregate_by_period
+
+        df = pd.DataFrame({'date': dates, 'sales': np.arange(36, dtype=float)})
+        series, freq, _ = aggregate_by_period(df, 'sales', 'date')
+
+        assert freq == 'M'
+        assert len(series) == 36
+
+    def test_date_only_daily_keeps_last_day(self):
+        from src.analysis.trends import aggregate_by_period
+
+        df = pd.DataFrame({'date': pd.date_range('2023-01-01', periods=30),
+                           'sales': np.arange(30, dtype=float)})
+        series, freq, _ = aggregate_by_period(df, 'sales', 'date')
+
+        assert freq == 'D'
+        assert len(series) == 30
+
+
+class TestSparseAndTimezoneData:
+    def test_quarterly_data_grouped_by_quarter_not_zero_filled(self):
+        """12 rising quarterly figures must read as a clean increase."""
+        df = pd.DataFrame({
+            'date': pd.date_range('2021-01-01', periods=12, freq='QS'),
+            'revenue': np.arange(1000, 13000, 1000, dtype=float),
+        })
+        trend = analyze_trend(df, 'revenue', 'date')
+
+        assert trend.period == 'quarterly'
+        assert trend.trend_direction == 'increasing'
+        assert trend.seasonality_detected is False
+
+    def test_period_with_only_missing_values_is_not_zero(self):
+        from src.analysis.trends import aggregate_by_period
+
+        dates = pd.date_range('2021-01-01', '2023-12-31')
+        values = np.full(len(dates), 10.0)
+        values[(dates.year == 2022) & (dates.month == 6)] = np.nan
+        series, _, _ = aggregate_by_period(
+            pd.DataFrame({'date': dates, 'sales': values}), 'sales', 'date')
+
+        assert pd.Period('2022-06', 'M') not in series.index
+        assert (series > 0).all()
+
+    def test_timezone_aware_dates(self):
+        df = pd.DataFrame({
+            'date': pd.date_range('2023-01-01', periods=200, tz='UTC'),
+            'value': np.arange(200, dtype=float),
+        })
+        trend = analyze_trend(df, 'value', 'date')
+
+        assert trend.trend_direction == 'increasing'

@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from src.output_files import sort_newest_first
+
 from .pipeline import PipelineConfig, PipelineStage, PipelineState
 
 
@@ -261,7 +263,7 @@ def find_manifests_for_source(
         output_dir: Directory to search
 
     Returns:
-        List of manifest file paths, sorted by modification time (newest first)
+        List of manifest file paths, newest filename timestamp first
     """
     from glob import glob
 
@@ -271,9 +273,7 @@ def find_manifests_for_source(
     pattern = os.path.join(output_dir, f"{source_name}_pipeline_manifest_*.json")
     matches = glob(pattern)
 
-    # Sort by modification time, newest first
-    matches.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-    return matches
+    return sort_newest_first(matches)
 
 
 def get_latest_manifest(
